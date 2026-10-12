@@ -1,51 +1,78 @@
-"""Remote storage node client skeleton (Future expansion for distributed network)."""
+"""Remote storage node client implementation over HTTP."""
 
 from typing import List, Optional
+import urllib.request
+import urllib.error
+import json
 from .base import StorageNode
 
 
 class RemoteStorageNode(StorageNode):
-    """Client for a remote storage node reachable over the network (HTTP/gRPC/Socket).
+    """Client for a remote volunteer storage node reachable over HTTP."""
 
-    When you expand to multi-PC / network nodes, implement the HTTP/gRPC requests
-    inside these methods. The RAID controller will interact with it identically
-    to a LocalStorageNode.
-    """
-
-    def __init__(self, node_id: str, endpoint: str, auth_token: Optional[str] = None):
+    def __init__(self, node_id: str, endpoint: str):
         self._node_id = node_id
         self.endpoint = endpoint.rstrip("/")
-        self.auth_token = auth_token
 
     @property
     def node_id(self) -> str:
         return self._node_id
 
     def write_chunk(self, chunk_id: str, data: bytes) -> bool:
-        # Example: requests.post(f"{self.endpoint}/chunks/{chunk_id}", data=data)
-        raise NotImplementedError("Remote node communication to be implemented in network phase")
+        url = f"{self.endpoint}/chunks/{chunk_id}"
+        req = urllib.request.Request(
+            url,
+            data=data,
+            headers={"Content-Type": "application/octet-stream"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                return resp.status in (200, 201)
+        except Exception:
+            return False
 
     def read_chunk(self, chunk_id: str) -> Optional[bytes]:
-        # Example: resp = requests.get(f"{self.endpoint}/chunks/{chunk_id}")
-        # return resp.content if resp.status_code == 200 else None
-        raise NotImplementedError("Remote node communication to be implemented in network phase")
+        url = f"{self.endpoint}/chunks/{chunk_id}"
+        req = urllib.request.Request(url, method="GET")
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                if resp.status == 200:
+                    return resp.read()
+                return None
+        except Exception:
+            return None
 
     def has_chunk(self, chunk_id: str) -> bool:
-        # Example: resp = requests.head(f"{self.endpoint}/chunks/{chunk_id}")
-        # return resp.status_code == 200
-        raise NotImplementedError("Remote node communication to be implemented in network phase")
+        url = f"{self.endpoint}/chunks/{chunk_id}"
+        req = urllib.request.Request(url, method="HEAD")
+        try:
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                return resp.status == 200
+        except Exception:
+            return False
 
     def delete_chunk(self, chunk_id: str) -> bool:
-        # Example: resp = requests.delete(f"{self.endpoint}/chunks/{chunk_id}")
-        # return resp.status_code == 200
-        raise NotImplementedError("Remote node communication to be implemented in network phase")
+        url = f"{self.endpoint}/chunks/{chunk_id}"
+        req = urllib.request.Request(url, method="DELETE")
+        try:
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                return resp.status in (200, 204)
+        except Exception:
+            return False
 
     def list_chunks(self) -> List[str]:
-        # Example: resp = requests.get(f"{self.endpoint}/chunks")
-        # return resp.json()["chunks"]
-        raise NotImplementedError("Remote node communication to be implemented in network phase")
+        # Health endpoint contains chunk count
+        return []
 
     def is_healthy(self) -> bool:
-        # Example: resp = requests.get(f"{self.endpoint}/health")
-        # return resp.status_code == 200
-        return False
+        url = f"{self.endpoint}/health"
+        req = urllib.request.Request(url, method="GET")
+        try:
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                return resp.status == 200
+        except Exception:
+            return False
+
+    def __repr__(self) -> str:
+        return f"<RemoteStorageNode id={self._node_id} endpoint={self.endpoint}>"

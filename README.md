@@ -1,149 +1,115 @@
-# Reed-Solomon Erasure-Coded RAID System (Python)
+# Reed-Solomon Erasure-Coded RAID & P2P Storage System (Python)
 
-A fault-tolerant distributed storage and RAID simulation built in Python using **Reed-Solomon Erasure Coding** (`zfec`).
-
----
-
-## 📌 Features
-
-- **$(k, m)$ Reed-Solomon Erasure Coding**: Configurable data chunks ($k$) and parity chunks ($m$).
-- **Configurable Fault Tolerance**: Defaults to the industrial standard **$k=4, m=2$** (6 nodes, tolerates any 2 simultaneous node crashes with only $1.5\times$ storage overhead). Both $k$ and $m$ can be changed on the fly.
-- **Node-Decoupled Architecture**: Clean `StorageNode` abstraction. Currently simulates multi-disk nodes as local directories (`output/nodes/node_0`, `node_1`, etc.), and is architected to swap in remote network nodes (HTTP/gRPC) in the future.
-- **Bit-Rot & Corruption Detection**: Every chunk is signed with a SHA-256 checksum in a metadata manifest to prevent silent data corruption.
-- **Degraded Read & Self-Healing (Repair)**: Seamlessly reconstructs files from any $k$ surviving chunks and can rebuild missing chunks back onto damaged nodes.
+A fault-tolerant distributed storage and peer-to-peer volunteer network simulation built in Python using **Reed-Solomon Erasure Coding** (`zfec`).
 
 ---
 
-## 📁 Directory Structure
+## 📌 Architecture Highlights
+
+### 1. Asymmetric Hybrid-P2P Architecture
+- **Fast Ingress (Store)**: Active node sends the file to the **Coordinating Node** in a single fast stream. The Coordinator offloads the Reed-Solomon erasure encoding $(k, m)$ and fans out chunks to volunteer peer computers in parallel.
+- **Direct P2P Egress (Retrieve)**: Active node queries the Coordinator for a tiny manifest, then downloads chunks **in parallel directly from the Volunteer Storage Peers**. Bypasses the Coordinator entirely for high throughput, swarm bandwidth aggregation, and zero bottleneck.
+- **Volunteer Churn Resilience**: Reconstructs files from **any $k$ surviving peers**. If up to $m$ volunteer laptops disconnect or go to sleep, retrieval still succeeds seamlessly.
+- **Bit-Rot & Byzantine Protection**: Every chunk's SHA-256 hash is checked on arrival. Bad or tampered chunks from untrusted volunteers are dropped immediately.
+
+---
+
+## 📁 Project Structure
 
 ```text
 reed-solomon/
-├── input/                      # Place your input files here
+├── input/                      # Place source files here
 │   └── sample.txt
-├── output/                    # RAID storage testbed
-│   ├── metadata/              # JSON manifests (chunk checksums, file metadata)
-│   ├── nodes/                 # Simulated storage drives (node_0, node_1, ...)
-│   │   ├── node_0/
-│   │   ├── node_1/
-│   │   └── ...
-│   └── restored/              # Reconstructed files from retrieval
+├── output/
+│   ├── metadata/               # Local RAID manifests
+│   ├── nodes/                  # Local simulated disks
+│   ├── p2p_metadata/           # P2P manifests catalog
+│   ├── p2p_nodes/              # Chunks on volunteer PCs
+│   └── p2p_restored/           # Reconstructed files from P2P retrieval
 ├── src/
 │   └── rs_raid/
-│       ├── config.py          # Default k, m, and directory settings
+│       ├── config.py           # Industrial defaults (k=4, m=2)
 │       ├── core/
-│       │   └── codec.py       # Reed-Solomon encoder/decoder (zfec wrapper)
-│       ├── storage/
-│       │   ├── base.py        # Abstract StorageNode interface
-│       │   ├── local.py       # LocalStorageNode (simulates drive directories)
-│       │   └── remote.py      # RemoteStorageNode skeleton for future network PCs
+│       │   └── codec.py        # zfec Reed-Solomon wrapper
 │       ├── metadata/
-│       │   └── manifest.py    # FileManifest and ChunkMetadata tracking
-│       └── raid/
-│           ├── cluster.py     # Node cluster & health management
-│           └── controller.py  # store_file, retrieve_file, inspect_file, repair_file
-└── main.py                    # CLI & comprehensive demo runner
+│       │   └── manifest.py     # FileManifest and ChunkMetadata models
+│       ├── storage/
+│       │   ├── base.py         # StorageNode abstract interface
+│       │   ├── local.py        # Local folder disk simulation
+│       │   └── remote.py       # HTTP client node implementation
+│       └── network/
+│           ├── peer_daemon.py  # Daemon running on Volunteer PCs (HTTP server)
+│           ├── coordinator.py  # Ingress & Erasure Hub + Peer Tracker
+│           └── client.py       # Active Node P2P Client
+└── main.py                     # CLI & automated demo runners
 ```
 
 ---
 
-## 🚀 Quick Start & CLI Usage
+## 🚀 Quick Start: Automated Demos
 
-### 1. Run the Full End-to-End Simulation & Verification
-Runs an automated test that encodes `input/sample.txt`, intentionally deletes $m$ storage nodes, reconstructs the file, verifies the SHA-256 hash bit-for-bit, and auto-repairs the lost chunks:
+### 1. Run the P2P Volunteer Network Demo
+Spins up 1 Coordinator, 6 Volunteer Peer Servers on local ports, sends a file to the Coordinator, **shuts down $m=2$ volunteer peers to simulate laptop dropouts**, and retrieves the file **directly from the surviving peers** in parallel:
+```bash
+python main.py p2p-demo
+```
+
+### 2. Run Local Drive RAID Simulation
+Tests the folder-based RAID array (encoding, deleting $m$ drives, reconstructing, and auto-repairing):
 ```bash
 python main.py demo
 ```
 
-To test with custom $(k, m)$ configurations (e.g., $k=6, m=3$ like HDFS):
-```bash
-python main.py demo --k 6 --m 3
-```
-
-### 2. Store a File
-Splits the file into $k$ data and $m$ parity chunks, distributed across nodes:
-```bash
-python main.py store input/sample.txt
-# Or with custom k, m:
-python main.py store input/sample.txt --k 4 --m 2
-```
-
-### 3. Inspect Cluster Health for a File
-Checks which nodes have the chunks, detects missing/corrupted chunks, and reports if the file is `HEALTHY`, `DEGRADED`, or `UNRECOVERABLE`:
-```bash
-python main.py inspect sample.txt
-```
-
-### 4. Retrieve & Reconstruct a File
-Reconstructs the file (tolerating up to $m$ failed or offline nodes) and saves it to `output/restored/`:
-```bash
-python main.py retrieve sample.txt
-```
-
-### 5. Auto-Repair Degraded Files
-Rebuilds missing or corrupted chunks and writes them back to the nodes:
-```bash
-python main.py repair sample.txt
-```
-
 ---
 
-## 🐍 Using the Python Helper Functions in Code
+## 🌐 Running Across Real Volunteer PCs on LAN / Wi-Fi
 
-You can import and use the helper functions directly in your own scripts:
+You can run this across multiple separate laptops/PCs on the same local network or Wi-Fi:
 
-```python
-from pathlib import Path
-from rs_raid import store_file, retrieve_file, inspect_file, repair_file
-
-# 1. Store a file (defaults to k=4, m=2; or pass custom values)
-manifest = store_file("input/sample.txt", k=4, m=2)
-print("Stored with file ID:", manifest.file_id)
-
-# 2. Inspect cluster status
-status = inspect_file("sample.txt")
-print(f"Status: {status['status']} ({status['healthy_count']}/{status['total_chunks']} chunks healthy)")
-
-# 3. Retrieve / Reconstruct
-restored_path = retrieve_file("sample.txt")
-print("Reconstructed at:", restored_path)
-
-# 4. Repair degraded file
-repair_report = repair_file("sample.txt")
-print("Repaired chunks:", repair_report["repaired_chunks"])
+### Machine 1: The Coordinator
+Run on a designated machine (e.g., IP `192.168.1.10`):
+```bash
+python main.py coordinator --port 8000 --host 0.0.0.0
 ```
 
----
+### Machine 2, 3, 4...: Volunteer PCs
+Run on any volunteer computer (e.g., PC 1 at `192.168.1.51`, PC 2 at `192.168.1.52`):
+```bash
+# On Volunteer PC 1:
+python main.py peer --node-id volunteer_laptop_1 --port 8001 --advertise-host 192.168.1.51 --coordinator http://192.168.1.10:8000
 
-## ⚙️ Changing Industrial Defaults $(k, m)$
+# On Volunteer PC 2:
+python main.py peer --node-id volunteer_desktop_2 --port 8001 --advertise-host 192.168.1.52 --coordinator http://192.168.1.10:8000
+```
+*The volunteer peers will automatically register with the Coordinator and start sending periodic heartbeats.*
 
-You have 3 ways to change $k$ and $m$:
+### Active Node (Client)
+On any computer that wants to store or retrieve files:
 
-1. **In Code**: Pass `k` and `m` directly to `store_file(path, k=6, m=3)`.
-2. **Via Environment Variables**:
+1. **Fast Store (Sends to Coordinator, which fans out to volunteers)**:
    ```bash
-   export RS_K=6
-   export RS_M=3
-   python main.py demo
+   python main.py p2p-store input/sample.txt --coordinator http://192.168.1.10:8000
    ```
-3. **In Configuration**: Edit `src/rs_raid/config.py`:
-   ```python
-   DEFAULT_K = 4  # Change default data chunks
-   DEFAULT_M = 2  # Change default parity chunks
+
+2. **Direct P2P Retrieve (Fetches chunks directly from volunteer PCs)**:
+   ```bash
+   python main.py p2p-retrieve <FILE_ID> --coordinator http://192.168.1.10:8000
    ```
 
 ---
 
-## 🌐 Future Roadmap: Distributed Multi-Node Storage
+## 🐍 Using the P2P Client in Python Code
 
-The system is designed with an abstract `StorageNode` interface:
 ```python
-class StorageNode(ABC):
-    def write_chunk(self, chunk_id: str, data: bytes) -> bool: ...
-    def read_chunk(self, chunk_id: str) -> bytes | None: ...
-    def is_healthy(self) -> bool: ...
-```
+from rs_raid.network.client import P2PClient
 
-To move from local folders to independent networked PCs/nodes:
-1. Run a lightweight worker server (FastAPI, Flask, or gRPC) on each target machine.
-2. Implement `RemoteStorageNode` in `src/rs_raid/storage/remote.py` to forward chunk reads/writes over HTTP/gRPC.
-3. The `RaidController`, `FileManifest`, and Reed-Solomon erasure logic remain identical!
+client = P2PClient(coordinator_url="http://192.168.1.10:8000")
+
+# 1. Store: single fast stream to Coordinator
+manifest = client.store("input/sample.txt", k=4, m=2)
+print("Stored with File ID:", manifest["file_id"])
+
+# 2. Retrieve: parallel direct pull from volunteer peer swarm
+restored_path = client.retrieve(manifest["file_id"])
+print("Restored to:", restored_path)
+```
