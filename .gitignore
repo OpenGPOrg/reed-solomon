@@ -14,3 +14,6 @@ wheels/
 input/
 output/
 volunteer_storage/
+
+.DS_Store
+*.DS_Store

@@ -1,0 +1,60 @@
+syntax = "proto3";
+
+package rsp2p.storage;
+
+service StorageService {
+  rpc StoreChunk(StoreChunkRequest) returns (StoreChunkResponse);
+  rpc GetChunk(GetChunkRequest) returns (GetChunkResponse);
+  rpc HasChunk(HasChunkRequest) returns (HasChunkResponse);
+  rpc DeleteChunk(DeleteChunkRequest) returns (DeleteChunkResponse);
+  rpc GetHealth(HealthRequest) returns (HealthResponse);
+}
+
+message StoreChunkRequest {
+  string chunk_id = 1;
+  int32 chunk_index = 2;
+  bytes data = 3;
+  string checksum_sha256 = 4;
+}
+
+message StoreChunkResponse {
+  bool success = 1;
+  string error_message = 2;
+  int64 bytes_written = 3;
+}
+
+message GetChunkRequest {
+  string chunk_id = 1;
+}
+
+message GetChunkResponse {
+  bool found = 1;
+  bytes data = 2;
+  string checksum_sha256 = 3;
+}
+
+message HasChunkRequest {
+  string chunk_id = 1;
+}
+
+message HasChunkResponse {
+  bool exists = 1;
+  int64 size_bytes = 2;
+}
+
+message DeleteChunkRequest {
+  string chunk_id = 1;
+}
+
+message DeleteChunkResponse {
+  bool success = 1;
+}
+
+message HealthRequest {}
+
+message HealthResponse {
+  string node_id = 1;
+  string status = 2;
+  int32 chunk_count = 3;
+  int64 free_bytes = 4;
+}
