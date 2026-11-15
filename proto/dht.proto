@@ -1,0 +1,60 @@
+syntax = "proto3";
+
+package rsp2p.dht;
+
+service DHTService {
+  rpc Ping(PingRequest) returns (PingResponse);
+  rpc FindNode(FindNodeRequest) returns (FindNodeResponse);
+  rpc FindValue(FindValueRequest) returns (FindValueResponse);
+  rpc StoreValue(StoreValueRequest) returns (StoreValueResponse);
+}
+
+message NodeContact {
+  string node_id = 1;     // Hex encoded 160-bit node ID or identifier
+  string host = 2;
+  int32 port = 3;         // gRPC port
+  string role = 4;         // "passive" (storage) or "active" (compute)
+}
+
+message PingRequest {
+  NodeContact sender = 1;
+}
+
+message PingResponse {
+  NodeContact responder = 1;
+  bool ok = 2;
+}
+
+message FindNodeRequest {
+  NodeContact sender = 1;
+  string target_id = 2;
+}
+
+message FindNodeResponse {
+  repeated NodeContact contacts = 1;
+}
+
+message FindValueRequest {
+  NodeContact sender = 1;
+  string namespace = 2;    // e.g. "NS1" (liveness/placement) or "NS2" (chunks/context)
+  string key = 3;
+}
+
+message FindValueResponse {
+  bool found = 1;
+  bytes value = 2;
+  repeated NodeContact closer_contacts = 3;
+}
+
+message StoreValueRequest {
+  NodeContact sender = 1;
+  string namespace = 2;
+  string key = 3;
+  bytes value = 4;
+  int64 ttl_seconds = 5;
+}
+
+message StoreValueResponse {
+  bool success = 1;
+  string error_message = 2;
+}

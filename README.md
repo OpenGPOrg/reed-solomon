@@ -1,115 +1,162 @@
-# Reed-Solomon Erasure-Coded RAID & P2P Storage System (Python)
+# Decentralized Reed-Solomon P2P Storage & DHT System
 
-A fault-tolerant distributed storage and peer-to-peer volunteer network simulation built in Python using **Reed-Solomon Erasure Coding** (`zfec`).
+A fault-tolerant, peer-to-peer distributed storage and checkpoint network built in Python using **Reed-Solomon Erasure Coding** (`zfec`), **Kademlia DHT overlay**, and **gRPC** for low-latency node-to-node communication.
+
+Designed for distributed LLM pipeline parallel inference, passive volunteer storage nodes, and terminal activation checkpointing.
 
 ---
 
 ## 📌 Architecture Highlights
 
-### 1. Asymmetric Hybrid-P2P Architecture
-- **Fast Ingress (Store)**: Active node sends the file to the **Coordinating Node** in a single fast stream. The Coordinator offloads the Reed-Solomon erasure encoding $(k, m)$ and fans out chunks to volunteer peer computers in parallel.
-- **Direct P2P Egress (Retrieve)**: Active node queries the Coordinator for a tiny manifest, then downloads chunks **in parallel directly from the Volunteer Storage Peers**. Bypasses the Coordinator entirely for high throughput, swarm bandwidth aggregation, and zero bottleneck.
-- **Volunteer Churn Resilience**: Reconstructs files from **any $k$ surviving peers**. If up to $m$ volunteer laptops disconnect or go to sleep, retrieval still succeeds seamlessly.
-- **Bit-Rot & Byzantine Protection**: Every chunk's SHA-256 hash is checked on arrival. Bad or tampered chunks from untrusted volunteers are dropped immediately.
+```
+                                 ┌────────────────────────────────────────────────────────┐
+                                 │                   Kademlia DHT Overlay                 │
+                                 │  NS1: Active Layer Placement & Volunteer Node Liveness │
+                                 │  NS2: Shared Chunk Index & Manifest Context Store      │
+                                 └───────────────┬────────────────────────┬───────────────┘
+                                                 ▲                        ▲
+                                DHT Registration │                        │ DHT Store / Lookup
+                                & Heartbeats     │                        │ (Manifest & Locations)
+                                                 │                        │
+[Active Compute Node A2] ───────────────[ActiveNodeClient SDK]────────────┘
+(Computes L6-L9)                        │ 1. Encode Activation via RSCodec (k+m shards)
+                                        │ 2. Find closest/healthy passive peers via DHT
+                                        ▼ 3. Parallel gRPC Chunk Streams
+                    ┌───────────────────┼───────────────────┐
+                    │                   │                   │
+             (gRPC StoreChunk)   (gRPC StoreChunk)   (gRPC StoreChunk)
+                    ▼                   ▼                   ▼
+              [Passive Peer 0]    [Passive Peer 1]    [Passive Peer N]  (Disk/SSD Storage)
+                    │                   │                   │
+                    └───────────────────┼───────────────────┘
+                                        │ 1. Restoring Node B3 queries DHT NS2 for manifest
+                                        │ 2. Downloads k fastest chunks in parallel via gRPC
+                                        ▼ 3. RS Decodes & recovers activation tensor
+                               [Active Compute Node B3] (Resumes L10-L15)
+```
+
+### 1. Zero Single Point of Failure (SPOF-free)
+- **Decentralized Coordination**: Central coordinator eliminated. Replaced by a native **Kademlia DHT** overlay with 160-bit XOR distance routing and K-buckets.
+- **Dual Namespace Isolation**:
+  - `NS1`: Active compute node layer placement (`L6-L9 -> endpoint`) and node liveness heartbeats.
+  - `NS2`: Shared chunk location index and activation checkpoint manifests.
+
+### 2. High-Performance gRPC Communication
+- Node-to-node communication runs entirely over **gRPC & Protocol Buffers (`.proto`)**:
+  - `StorageService`: `StoreChunk`, `GetChunk`, `HasChunk`, `DeleteChunk`, `GetHealth`.
+  - `DHTService`: `Ping`, `FindNode`, `FindValue`, `StoreValue`.
+- Binary wire protocol eliminates JSON / HTTP REST serialization overhead.
+
+### 3. Configurable Checkpoint Activation Format
+Extensible `ActivationSerializer` abstract base class with pluggable serializers:
+- `TensorActivationSerializer`: LLM activation serialization with tensor metadata (`shape`, `dtype`, `layer_index`, `sequence_id`).
+- `RawBytesSerializer`: Header-prefixed raw bytes buffer.
+- `JSONPayloadSerializer`: Generic JSON-serializable dictionaries.
+- Custom serializers can be registered via `register_serializer("custom", MySerializer())`.
+
+### 4. Resilient Passive Volunteer Network
+- Any volunteer laptop or server with CPU/Disk/SSD can participate (zero GPU requirement).
+- Tolerates simultaneous failure of up to $m$ passive nodes. Files/activations are reconstructed from **any $k$ surviving chunks**.
 
 ---
 
-## 📁 Project Structure
+## 📁 Repository Structure
 
 ```text
 reed-solomon/
-├── input/                      # Place source files here
-│   └── sample.txt
-├── output/
-│   ├── metadata/               # Local RAID manifests
-│   ├── nodes/                  # Local simulated disks
-│   ├── p2p_metadata/           # P2P manifests catalog
-│   ├── p2p_nodes/              # Chunks on volunteer PCs
-│   └── p2p_restored/           # Reconstructed files from P2P retrieval
+├── proto/                          # Protocol Buffer definitions
+│   ├── storage.proto               # gRPC Chunk Storage Service
+│   └── dht.proto                   # gRPC Kademlia DHT Service
+│
 ├── src/
-│   └── rs_raid/
-│       ├── config.py           # Industrial defaults (k=4, m=2)
-│       ├── core/
-│       │   └── codec.py        # zfec Reed-Solomon wrapper
-│       ├── metadata/
-│       │   └── manifest.py     # FileManifest and ChunkMetadata models
-│       ├── storage/
-│       │   ├── base.py         # StorageNode abstract interface
-│       │   ├── local.py        # Local folder disk simulation
-│       │   └── remote.py       # HTTP client node implementation
-│       └── network/
-│           ├── peer_daemon.py  # Daemon running on Volunteer PCs (HTTP server)
-│           ├── coordinator.py  # Ingress & Erasure Hub + Peer Tracker
-│           └── client.py       # Active Node P2P Client
-└── main.py                     # CLI & automated demo runners
+│   ├── rs_p2p/                     # Decentralized P2P & gRPC Engine
+│   │   ├── config.py               # Cluster defaults (k=4, m=2, ports, namespaces)
+│   │   ├── core/
+│   │   │   ├── codec.py            # zfec Reed-Solomon wrapper
+│   │   │   └── serializer.py       # Configurable Activation Serializer format
+│   │   ├── storage/
+│   │   │   └── disk.py             # Volunteer node disk chunk storage
+│   │   ├── dht/
+│   │   │   ├── node.py             # XOR distance, Contacts, K-Buckets, RoutingTable
+│   │   │   └── kademlia.py         # KademliaNode: iterative lookup, NS1 & NS2 store
+│   │   ├── proto/                  # Compiled gRPC Python stubs (storage_pb2, dht_pb2)
+│   │   └── network/
+│   │       ├── services.py         # gRPC Servicers (StorageServicer, DHTServicer)
+│   │       ├── peer_node.py        # Passive Volunteer Peer Server daemon
+│   │       └── client.py           # ActiveNodeClient SDK (send_checkpoint, receive_backup)
+│   │
+│   └── rs_raid/                    # Local folder-based disk array simulation
+│
+├── tests/
+│   ├── test_codec_and_serializer.py# Unit tests for RS and serializers
+│   └── test_p2p_pipeline.py        # End-to-end integration test (sharding + dropout + recovery)
+│
+├── main.py                         # CLI tool for demos, peer daemons, seed, store/restore
+└── pyproject.toml
 ```
 
 ---
 
-## 🚀 Quick Start: Automated Demos
+## 🚀 Quick Start
 
-### 1. Run the P2P Volunteer Network Demo
-Spins up 1 Coordinator, 6 Volunteer Peer Servers on local ports, sends a file to the Coordinator, **shuts down $m=2$ volunteer peers to simulate laptop dropouts**, and retrieves the file **directly from the surviving peers** in parallel:
+### 1. Run Automated P2P gRPC + DHT Demo
+Spins up 6 passive peer servers on local ports, bootstraps DHT, stores an activation checkpoint, **intentionally kills $m=2$ volunteer peers**, and recovers the activation **100% bit-for-bit** directly from surviving peers:
+
 ```bash
-python main.py p2p-demo
+uv run python main.py p2p-demo
 ```
 
-### 2. Run Local Drive RAID Simulation
-Tests the folder-based RAID array (encoding, deleting $m$ drives, reconstructing, and auto-repairing):
+### 2. Run Local RAID Array Simulation
+Tests folder-based Reed-Solomon RAID array encoding, drive failure, and auto-healing:
+
 ```bash
-python main.py demo
+uv run python main.py demo
 ```
 
 ---
 
-## 🌐 Running Across Real Volunteer PCs on LAN / Wi-Fi
+## 🌐 Running Across Real Volunteer Computers
 
-You can run this across multiple separate laptops/PCs on the same local network or Wi-Fi:
-
-### Machine 1: The Coordinator
-Run on a designated machine (e.g., IP `192.168.1.10`):
+### 1. Bootstrap DHT Seed Node
+On the initial seed machine (e.g. `192.168.1.10`):
 ```bash
-python main.py coordinator --port 8000 --host 0.0.0.0
+uv run python main.py seed --host 0.0.0.0 --port 7000
 ```
 
-### Machine 2, 3, 4...: Volunteer PCs
-Run on any volunteer computer (e.g., PC 1 at `192.168.1.51`, PC 2 at `192.168.1.52`):
+### 2. Volunteer Storage Peers (Passive Nodes)
+On any volunteer PC or laptop (e.g. PC 1 at `192.168.1.51`, PC 2 at `192.168.1.52`):
 ```bash
 # On Volunteer PC 1:
-python main.py peer --node-id volunteer_laptop_1 --port 8001 --advertise-host 192.168.1.51 --coordinator http://192.168.1.10:8000
+uv run python main.py peer --node-id laptop_1 --port 7001 --seeds 192.168.1.10:7000
 
 # On Volunteer PC 2:
-python main.py peer --node-id volunteer_desktop_2 --port 8001 --advertise-host 192.168.1.52 --coordinator http://192.168.1.10:8000
+uv run python main.py peer --node-id desktop_2 --port 7001 --seeds 192.168.1.10:7000
 ```
-*The volunteer peers will automatically register with the Coordinator and start sending periodic heartbeats.*
 
-### Active Node (Client)
-On any computer that wants to store or retrieve files:
-
-1. **Fast Store (Sends to Coordinator, which fans out to volunteers)**:
-   ```bash
-   python main.py p2p-store input/sample.txt --coordinator http://192.168.1.10:8000
-   ```
-
-2. **Direct P2P Retrieve (Fetches chunks directly from volunteer PCs)**:
-   ```bash
-   python main.py p2p-retrieve <FILE_ID> --coordinator http://192.168.1.10:8000
-   ```
-
----
-
-## 🐍 Using the P2P Client in Python Code
+### 3. Active Compute Node (Pipeline Inference & Checkpoint Restore)
+In your Python pipeline code or via CLI:
 
 ```python
-from rs_raid.network.client import P2PClient
+from rs_p2p import ActiveNodeClient
 
-client = P2PClient(coordinator_url="http://192.168.1.10:8000")
+# Connect to DHT overlay via seed
+client = ActiveNodeClient(seed_endpoints=["192.168.1.10:7000"])
 
-# 1. Store: single fast stream to Coordinator
-manifest = client.store("input/sample.txt", k=4, m=2)
-print("Stored with File ID:", manifest["file_id"])
+# 1. Register Active Node layer placement in DHT NS1
+client.register_layer_placement("stage_2", "192.168.1.20:50051", extra={"layers": "L6-L9"})
 
-# 2. Retrieve: parallel direct pull from volunteer peer swarm
-restored_path = client.retrieve(manifest["file_id"])
-print("Restored to:", restored_path)
+# 2. Backup checkpoint activation from Stage A2
+activation_tensor_bytes = ... # tensor byte buffer
+manifest = client.send_checkpoint_activations(
+    activation_payload=activation_tensor_bytes,
+    checkpoint_id="chk_stage2_step42",
+    k=4,
+    m=2,
+    serializer_name="tensor",
+    metadata={"shape": [1, 64, 4096], "dtype": "bfloat16", "sequence_id": "prompt_102"}
+)
+
+# 3. Restoring Node B3 recovers backup after A3 crashes
+restored_tensor, meta = client.receive_backup("chk_stage2_step42", serializer_name="tensor")
+print(f"Recovered tensor for {meta['sequence_id']}, shape={meta['shape']}")
 ```
