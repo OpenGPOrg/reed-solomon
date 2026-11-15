@@ -86,6 +86,11 @@ class DHTServicer(dht_pb2_grpc.DHTServiceServicer):
         self.dht_node = dht_node
 
     def _record_sender(self, sender_pb: dht_pb2.NodeContact):
+        # TODO(bugfix): ActiveNodeClient is a client-only SDK (defaults to port=0, role="active")
+        # and does not run a listening DHTService gRPC server. Recording it in RoutingTable
+        # causes lookup_node() / iterative_store() to return unroutable 127.0.0.1:0 contacts.
+        # Fix: Ignore client-only callers (e.g., if sender_pb.port <= 0 or sender_pb.role != "passive": return)
+        # unless Active Nodes also run a listening DHTService server.
         if not sender_pb or not sender_pb.node_id:
             return
         contact = Contact(
