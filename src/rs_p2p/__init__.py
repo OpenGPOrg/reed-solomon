@@ -17,7 +17,6 @@ from .network.client import ActiveNodeClient
 from .config import (
     DEFAULT_K,
     DEFAULT_M,
-    NS_COMPUTE_LIVENESS,
     NS_STORAGE_INDEX,
 )
 
@@ -36,6 +35,5 @@ __all__ = [
     "ActiveNodeClient",
     "DEFAULT_K",
     "DEFAULT_M",
-    "NS_COMPUTE_LIVENESS",
     "NS_STORAGE_INDEX",
 ]

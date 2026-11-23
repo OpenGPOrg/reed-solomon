@@ -5,7 +5,7 @@ Supports:
              checkpoint activation sharding, and node dropouts.
 2. seed: Runs a Kademlia DHT bootstrap seed node.
 3. peer: Runs a Passive Volunteer Peer Daemon (gRPC storage + DHT node).
-4. store-activation: Stores a file/checkpoint across passive nodes via client-side RS encoding.
+4. store-activation: Uploads an activation/file to a passive relay for RAID encoding & storage.
 5. restore-activation: Retrieves and recovers activation using any k surviving chunks.
 """
 
@@ -43,16 +43,20 @@ def main():
 
     # 2. seed node
     seed_p = subparsers.add_parser("seed", help="Start a Kademlia DHT bootstrap seed node")
+    seed_p.add_argument("--node-id", default="seed_bootstrap", help="Unique node identifier")
     seed_p.add_argument("--port", type=int, default=7000, help="Port to bind seed gRPC server")
     seed_p.add_argument("--host", default="0.0.0.0", help="Host interface to bind")
+    seed_p.add_argument("--advertise-host", default=None, help="Reachable LAN/WAN host advertised in DHT")
+    seed_p.add_argument("--dir", default=None, help="Directory to store chunks & DHT state")
 
     # 3. passive peer daemon
     peer_p = subparsers.add_parser("peer", help="Run a passive volunteer storage daemon")
     peer_p.add_argument("--node-id", required=True, help="Unique node identifier")
     peer_p.add_argument("--port", type=int, default=7001, help="Port to listen on")
     peer_p.add_argument("--host", default="0.0.0.0", help="Host interface to bind")
+    peer_p.add_argument("--advertise-host", default=None, help="Reachable LAN/WAN host advertised in DHT")
     peer_p.add_argument("--seeds", nargs="*", default=["127.0.0.1:7000"], help="Bootstrap seed endpoints")
-    peer_p.add_argument("--dir", default=None, help="Directory to store chunks")
+    peer_p.add_argument("--dir", default=None, help="Directory to store chunks & DHT state")
 
     # 4. store activation
     store_p = subparsers.add_parser("store-activation", help="Store checkpoint activation via P2P")
@@ -76,11 +80,13 @@ def main():
         run_p2p_demo()
     elif args.command == "seed":
         server = PassivePeerServer(
-            node_id_str="seed_bootstrap",
+            node_id_str=args.node_id,
             host=args.host,
             port=args.port,
+            storage_dir=args.dir,
+            advertise_host=args.advertise_host,
         )
-        print(f"Starting DHT Bootstrap Seed Node on {args.host}:{args.port}...")
+        print(f"Starting DHT Bootstrap Seed Node [{args.node_id}] on {args.host}:{args.port}...")
         server.start()
         try:
             server.wait_for_termination()
@@ -92,6 +98,7 @@ def main():
             host=args.host,
             port=args.port,
             storage_dir=args.dir,
+            advertise_host=args.advertise_host,
         )
         print(f"Starting Volunteer Peer [{args.node_id}] on {args.host}:{args.port}...")
         server.start(seed_endpoints=args.seeds)
@@ -115,6 +122,9 @@ def main():
             metadata={"filename": file_path.name, "size": len(data)},
         )
         print(f"✓ Checkpoint stored successfully! ID: {manifest['checkpoint_id']}")
+        print(f"  Coordinator relay: {manifest.get('coordinator_endpoint')}")
+        for chk in manifest.get("chunks", []):
+            print(f"  - Chunk #{chk['chunk_index']} ({chk['chunk_type']}) -> {chk['endpoint']}")
         client.close()
     elif args.command == "restore-activation":
         client = ActiveNodeClient(seed_endpoints=args.seeds)
