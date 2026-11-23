@@ -2,8 +2,10 @@
 
 from pathlib import Path
 from typing import Optional, Tuple
-import shutil
 import logging
+import os
+import shutil
+import tempfile
 
 logger = logging.getLogger("DiskStorage")
 
@@ -16,34 +18,55 @@ class DiskStorage:
         self.node_id = node_id
         self.storage_dir.mkdir(parents=True, exist_ok=True)
 
-    def write_chunk(self, chunk_id: str, data: bytes) -> int:
-        """Writes chunk bytes to disk. Returns bytes written."""
+    def _chunk_path(self, chunk_id: str) -> Path:
+        """Sanitizes chunk_id and resolves its on-disk path safely."""
         safe_id = "".join(c for c in chunk_id if c.isalnum() or c in ("-", "_", "."))
-        chunk_file = self.storage_dir / f"{safe_id}.chunk"
-        chunk_file.write_bytes(data)
-        logger.debug(f"[{self.node_id}] Stored chunk {safe_id} ({len(data)} bytes)")
+        if not safe_id or safe_id in (".", "..") or set(safe_id) == {"."}:
+            raise ValueError(f"Invalid chunk_id: {chunk_id!r}")
+        return self.storage_dir / f"{safe_id}.chunk"
+
+    def write_chunk(self, chunk_id: str, data: bytes) -> int:
+        """Writes chunk bytes atomically to disk. Returns bytes written."""
+        chunk_file = self._chunk_path(chunk_id)
+        tmp_path: Optional[Path] = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                dir=self.storage_dir,
+                prefix=f".{chunk_file.stem}.",
+                suffix=".tmp",
+                delete=False,
+            ) as tmp:
+                tmp_path = Path(tmp.name)
+                tmp.write(data)
+                tmp.flush()
+            os.replace(tmp_path, chunk_file)
+        except Exception:
+            if tmp_path is not None and tmp_path.exists():
+                try:
+                    tmp_path.unlink()
+                except OSError:
+                    pass
+            raise
+        logger.debug(f"[{self.node_id}] Stored chunk {chunk_file.stem} ({len(data)} bytes)")
         return len(data)
 
     def read_chunk(self, chunk_id: str) -> Optional[bytes]:
         """Reads chunk bytes from disk if exists."""
-        safe_id = "".join(c for c in chunk_id if c.isalnum() or c in ("-", "_", "."))
-        chunk_file = self.storage_dir / f"{safe_id}.chunk"
+        chunk_file = self._chunk_path(chunk_id)
         if not chunk_file.is_file():
             return None
         return chunk_file.read_bytes()
 
     def has_chunk(self, chunk_id: str) -> Tuple[bool, int]:
         """Checks if chunk exists on disk and returns (exists, size_bytes)."""
-        safe_id = "".join(c for c in chunk_id if c.isalnum() or c in ("-", "_", "."))
-        chunk_file = self.storage_dir / f"{safe_id}.chunk"
+        chunk_file = self._chunk_path(chunk_id)
         if chunk_file.is_file():
             return True, chunk_file.stat().st_size
         return False, 0
 
     def delete_chunk(self, chunk_id: str) -> bool:
         """Deletes chunk from disk."""
-        safe_id = "".join(c for c in chunk_id if c.isalnum() or c in ("-", "_", "."))
-        chunk_file = self.storage_dir / f"{safe_id}.chunk"
+        chunk_file = self._chunk_path(chunk_id)
         if chunk_file.is_file():
             chunk_file.unlink()
             return True

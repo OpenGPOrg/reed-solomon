@@ -8,6 +8,7 @@ service StorageService {
   rpc HasChunk(HasChunkRequest) returns (HasChunkResponse);
   rpc DeleteChunk(DeleteChunkRequest) returns (DeleteChunkResponse);
   rpc GetHealth(HealthRequest) returns (HealthResponse);
+  rpc StoreCheckpoint(StoreCheckpointRequest) returns (StoreCheckpointResponse);
 }
 
 message StoreChunkRequest {
@@ -57,4 +58,20 @@ message HealthResponse {
   string status = 2;
   int32 chunk_count = 3;
   int64 free_bytes = 4;
+}
+
+message StoreCheckpointRequest {
+  string checkpoint_id = 1;
+  bytes serialized_payload = 2;
+  int32 k = 3;
+  int32 m = 4;
+  string serializer_name = 5;
+  string metadata_json = 6;
+}
+
+message StoreCheckpointResponse {
+  bool success = 1;
+  string error_message = 2;
+  string checkpoint_id = 3;
+  string manifest_json = 4;
 }

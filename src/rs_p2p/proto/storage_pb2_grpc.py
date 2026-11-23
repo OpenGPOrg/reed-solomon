@@ -59,6 +59,11 @@ class StorageServiceStub:
                 request_serializer=storage__pb2.HealthRequest.SerializeToString,
                 response_deserializer=storage__pb2.HealthResponse.FromString,
                 _registered_method=True)
+        self.StoreCheckpoint = channel.unary_unary(
+                '/rsp2p.storage.StorageService/StoreCheckpoint',
+                request_serializer=storage__pb2.StoreCheckpointRequest.SerializeToString,
+                response_deserializer=storage__pb2.StoreCheckpointResponse.FromString,
+                _registered_method=True)
 
 
 class StorageServiceServicer:
@@ -94,6 +99,12 @@ class StorageServiceServicer:
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def StoreCheckpoint(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_StorageServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -121,6 +132,11 @@ def add_StorageServiceServicer_to_server(servicer, server):
                     servicer.GetHealth,
                     request_deserializer=storage__pb2.HealthRequest.FromString,
                     response_serializer=storage__pb2.HealthResponse.SerializeToString,
+            ),
+            'StoreCheckpoint': grpc.unary_unary_rpc_method_handler(
+                    servicer.StoreCheckpoint,
+                    request_deserializer=storage__pb2.StoreCheckpointRequest.FromString,
+                    response_serializer=storage__pb2.StoreCheckpointResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -258,6 +274,33 @@ class StorageService:
             '/rsp2p.storage.StorageService/GetHealth',
             storage__pb2.HealthRequest.SerializeToString,
             storage__pb2.HealthResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def StoreCheckpoint(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/rsp2p.storage.StorageService/StoreCheckpoint',
+            storage__pb2.StoreCheckpointRequest.SerializeToString,
+            storage__pb2.StoreCheckpointResponse.FromString,
             options,
             channel_credentials,
             insecure,

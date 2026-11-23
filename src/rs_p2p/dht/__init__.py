@@ -6,6 +6,7 @@ from .node import (
     int_to_hex,
     hex_to_int,
     xor_distance,
+    is_routable_server_contact,
 )
 from .kademlia import KademliaNode
 
@@ -17,5 +18,6 @@ __all__ = [
     "int_to_hex",
     "hex_to_int",
     "xor_distance",
+    "is_routable_server_contact",
     "KademliaNode",
 ]
