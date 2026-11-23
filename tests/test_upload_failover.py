@@ -1,0 +1,172 @@
+"""Integration test for upload failover with standby nodes (k + m + n)."""
+
+import sys
+import shutil
+import tempfile
+import time
+from pathlib import Path
+import pytest
+
+# Add src to sys.path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+
+from rs_p2p.network.peer_node import PassivePeerServer
+from rs_p2p.network.client import ActiveNodeClient
+
+
+def test_upload_failover_with_standby_nodes():
+    """Validates that if k+m+n nodes exist and one or more nodes fail during upload,
+
+    the client dynamically fails over to the standby nodes, successfully saves
+    all k+m chunks on surviving nodes, and can restore the data bit-for-bit.
+    """
+    temp_dir = Path(tempfile.mkdtemp(prefix="rs_failover_test_"))
+    peers = []
+    client = None
+    try:
+        k = 2
+        m = 1
+        n = 2  # 2 standby nodes -> total 5 nodes
+        total_nodes = k + m + n
+        base_port = 9400
+        seed_endpoint = f"127.0.0.1:{base_port}"
+
+        # 1. Start total_nodes passive peers
+        for i in range(total_nodes):
+            port = base_port + i
+            node_id = f"failover_peer_{i}"
+            peer_dir = temp_dir / node_id
+            peer = PassivePeerServer(
+                node_id_str=node_id,
+                host="127.0.0.1",
+                port=port,
+                storage_dir=peer_dir,
+            )
+            seeds = [seed_endpoint] if i > 0 else []
+            peer.start(seed_endpoints=seeds)
+            peers.append(peer)
+
+        time.sleep(1.0)
+
+        # 2. Connect client
+        client = ActiveNodeClient(
+            seed_endpoints=[seed_endpoint],
+            client_node_id="client_failover_tester",
+            local_port=9450,
+        )
+
+        # Intentionally stop peer 1 (base_port + 1) to simulate a dead node before/during upload
+        print(f"\nIntentionally stopping peer 1 ({base_port + 1}) to trigger failover...")
+        peers[1].stop()
+        time.sleep(0.3)
+
+        # 3. Store checkpoint with k=2, m=1 (requires 3 distinct healthy nodes).
+        # We supply all 5 endpoints as candidate prefer_passive_nodes.
+        # Candidate 1 is dead, so the client must fail over to standby nodes (peer 3 or 4).
+        all_endpoints = [f"127.0.0.1:{base_port + i}" for i in range(total_nodes)]
+        test_payload = b"FAILOVER_TEST_ACTIVATION_TENSOR_BYTES_" * 64
+        meta = {
+            "source_node": "A_failover",
+            "shape": [2, 128],
+            "dtype": "float32",
+            "sequence_id": "seq_test_failover",
+        }
+
+        manifest = client.send_checkpoint_activations(
+            activation_payload=test_payload,
+            checkpoint_id="chk_failover_test",
+            k=k,
+            m=m,
+            serializer_name="tensor",
+            metadata=meta,
+            prefer_passive_nodes=all_endpoints,
+        )
+
+        assert manifest is not None
+        assert len(manifest["chunks"]) == k + m
+
+        # Check endpoints where chunks were stored
+        stored_endpoints = [c["endpoint"] for c in manifest["chunks"]]
+        dead_endpoint = f"127.0.0.1:{base_port + 1}"
+        assert dead_endpoint not in stored_endpoints, f"Chunk was mistakenly assigned to dead node {dead_endpoint}"
+        assert len(set(stored_endpoints)) == k + m, f"Stored endpoints must all be unique: {stored_endpoints}"
+
+        print(f"Chunks successfully dispersed to healthy nodes: {stored_endpoints}")
+
+        # 4. Now test restore from the manifest to guarantee 100% bit-for-bit recovery
+        restored_payload, restored_meta = client.receive_backup(
+            checkpoint_id="chk_failover_test",
+            serializer_name="tensor",
+        )
+
+        assert restored_payload == test_payload
+        assert restored_meta["shape"] == [2, 128]
+        assert restored_meta["dtype"] == "float32"
+        assert restored_meta["sequence_id"] == "seq_test_failover"
+        print("Restoration after upload failover: 100% bit-for-bit match!")
+
+    finally:
+        if client:
+            client.close()
+        for p in peers:
+            try:
+                p.stop()
+            except Exception:
+                pass
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def test_upload_exhaustion_raises_runtime_error():
+    """Validates that when not enough healthy nodes exist to satisfy k+m,
+
+    the client raises a clear RuntimeError rather than hanging or corrupting the manifest.
+    """
+    temp_dir = Path(tempfile.mkdtemp(prefix="rs_exhaust_test_"))
+    peers = []
+    client = None
+    try:
+        base_port = 9500
+        seed_endpoint = f"127.0.0.1:{base_port}"
+
+        # Start only 2 peers
+        for i in range(2):
+            port = base_port + i
+            peer = PassivePeerServer(
+                node_id_str=f"exhaust_peer_{i}",
+                host="127.0.0.1",
+                port=port,
+                storage_dir=temp_dir / f"peer_{i}",
+            )
+            seeds = [seed_endpoint] if i > 0 else []
+            peer.start(seed_endpoints=seeds)
+            peers.append(peer)
+
+        time.sleep(0.5)
+
+        client = ActiveNodeClient(
+            seed_endpoints=[seed_endpoint],
+            client_node_id="client_exhaust_tester",
+            local_port=9550,
+        )
+
+        # Attempt to store with k=2, m=1 (requires 3 nodes, but only 2 exist)
+        with pytest.raises(RuntimeError, match="Insufficient passive nodes available"):
+            client.send_checkpoint_activations(
+                activation_payload=b"test_data",
+                checkpoint_id="chk_exhaust",
+                k=2,
+                m=1,
+                serializer_name="raw",
+                prefer_passive_nodes=[f"127.0.0.1:{base_port}", f"127.0.0.1:{base_port + 1}"],
+            )
+
+    finally:
+        if client:
+            client.close()
+        for p in peers:
+            try:
+                p.stop()
+            except Exception:
+                pass
+        shutil.rmtree(temp_dir, ignore_errors=True)
+

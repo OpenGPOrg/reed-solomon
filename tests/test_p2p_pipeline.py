@@ -132,5 +132,9 @@ def run_integration_test():
         shutil.rmtree(temp_dir, ignore_errors=True)
 
 
+def test_p2p_pipeline():
+    run_integration_test()
+
+
 if __name__ == "__main__":
     run_integration_test()

@@ -8,10 +8,11 @@ Handles:
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Set
 import hashlib
 import json
 import logging
+import threading
 import uuid
 import grpc
 
@@ -24,7 +25,7 @@ from ..config import (
 from ..core.codec import RSCodec
 from ..core.serializer import get_serializer
 from ..dht.kademlia import KademliaNode
-from ..dht.node import Contact, hash_key
+from ..dht.node import Contact, hash_key, xor_distance
 from ..proto import storage_pb2, storage_pb2_grpc
 
 logger = logging.getLogger("ActiveNodeClient")
@@ -52,6 +53,7 @@ class ActiveNodeClient:
         )
 
         self._storage_channels: Dict[str, grpc.Channel] = {}
+        self._channel_lock = threading.Lock()
         self._bootstrap()
 
     def _bootstrap(self):
@@ -74,10 +76,12 @@ class ActiveNodeClient:
             self.dht.bootstrap(seeds)
 
     def _get_storage_stub(self, endpoint: str) -> storage_pb2_grpc.StorageServiceStub:
-        if endpoint not in self._storage_channels:
-            channel = grpc.insecure_channel(endpoint)
-            self._storage_channels[endpoint] = channel
-        return storage_pb2_grpc.StorageServiceStub(self._storage_channels[endpoint])
+        with self._channel_lock:
+            if endpoint not in self._storage_channels:
+                channel = grpc.insecure_channel(endpoint)
+                self._storage_channels[endpoint] = channel
+            channel = self._storage_channels[endpoint]
+        return storage_pb2_grpc.StorageServiceStub(channel)
 
     def close(self):
         self.dht.close()
@@ -141,37 +145,48 @@ class ActiveNodeClient:
         chunks, original_length = codec.encode(serialized_bytes)
         total_chunks = k + m
 
-        # Find passive nodes
-        target_endpoints: List[str] = []
-        if prefer_passive_nodes and len(prefer_passive_nodes) >= total_chunks:
-            target_endpoints = prefer_passive_nodes[:total_chunks]
-        else:
-            # Query DHT for passive storage contacts
-            all_contacts = self.dht.routing_table.all_contacts()
-            passive = [c for c in all_contacts if c.role == "passive"]
-            if len(passive) < total_chunks:
-                # If local routing table doesn't have enough, try lookup
-                passive = self.dht.lookup_node(self.node_id_int)
-                passive = [c for c in passive if c.role == "passive"]
+        # 1. Collect candidate passive endpoints
+        candidate_endpoints: List[str] = []
+        if prefer_passive_nodes:
+            for ep in prefer_passive_nodes:
+                if ep and ep not in candidate_endpoints:
+                    candidate_endpoints.append(ep)
 
-            if len(passive) < total_chunks:
-                # Fallback to seed endpoints if discovered list is short
-                available_eps = list({c.endpoint for c in passive}.union(set(self.seed_endpoints)))
-                if len(available_eps) < total_chunks:
-                    raise RuntimeError(
-                        f"Insufficient passive nodes available: need {total_chunks}, found {len(available_eps)}"
-                    )
-                target_endpoints = available_eps[:total_chunks]
-            else:
-                target_endpoints = [c.endpoint for c in passive[:total_chunks]]
+        # 2. Query DHT for passive storage contacts
+        all_contacts = self.dht.routing_table.all_contacts()
+        passive_contacts = [c for c in all_contacts if c.role == "passive"]
 
-        # Prepare chunk payloads and metadata
+        # If we need more candidates, perform a Kademlia network lookup
+        if len(candidate_endpoints) < total_chunks or len(passive_contacts) < total_chunks:
+            discovered = self.dht.lookup_node(self.node_id_int)
+            for c in discovered:
+                if c.role == "passive" and c not in passive_contacts:
+                    passive_contacts.append(c)
+
+        # 3. Sort discovered passive contacts by XOR distance to checkpoint hash for natural load-balancing
+        target_id = hash_key(chk_id)
+        passive_contacts.sort(key=lambda c: xor_distance(c.node_id, target_id))
+
+        for c in passive_contacts:
+            if c.endpoint not in candidate_endpoints:
+                candidate_endpoints.append(c.endpoint)
+
+        # 4. Fallback: check seed endpoints if discovered list is short
+        for sep in self.seed_endpoints:
+            if sep and sep not in candidate_endpoints:
+                candidate_endpoints.append(sep)
+
+        if len(candidate_endpoints) < total_chunks:
+            raise RuntimeError(
+                f"Insufficient passive nodes available: need {total_chunks}, found {len(candidate_endpoints)}"
+            )
+
+        # Prepare chunk payloads
         chunk_descriptors = []
         for idx, chunk_bytes in enumerate(chunks):
             chunk_type = "data" if idx < k else "parity"
             chunk_id = f"{chk_id}_chunk_{idx}"
             checksum = hashlib.sha256(chunk_bytes).hexdigest()
-            endpoint = target_endpoints[idx]
 
             chunk_descriptors.append(
                 {
@@ -180,39 +195,106 @@ class ActiveNodeClient:
                     "chunk_type": chunk_type,
                     "checksum_sha256": checksum,
                     "size_bytes": len(chunk_bytes),
-                    "endpoint": endpoint,
                     "data": chunk_bytes,
                 }
             )
 
-        # Upload chunks in parallel via gRPC
-        def _upload_chunk(desc: dict) -> Tuple[bool, dict]:
-            stub = self._get_storage_stub(desc["endpoint"])
-            req = storage_pb2.StoreChunkRequest(
-                chunk_id=desc["chunk_id"],
-                chunk_index=desc["chunk_index"],
-                data=desc["data"],
-                checksum_sha256=desc["checksum_sha256"],
-            )
-            try:
-                resp = stub.StoreChunk(req, timeout=10.0)
-                return resp.success, desc
-            except Exception as e:
-                logger.warning(f"Failed to upload chunk {desc['chunk_id']} to {desc['endpoint']}: {e}")
-                return False, desc
+        # Concurrently upload chunks with dynamic failover across standby candidate nodes
+        selection_lock = threading.Lock()
+        used_endpoints: Set[str] = set()
+        failed_endpoints: Set[str] = set()
+
+        def _get_next_endpoint(attempted_for_chunk: Set[str]) -> Optional[str]:
+            with selection_lock:
+                for ep in candidate_endpoints:
+                    if ep not in used_endpoints and ep not in failed_endpoints and ep not in attempted_for_chunk:
+                        used_endpoints.add(ep)
+                        return ep
+                return None
+
+        def _release_endpoint(ep: str, mark_failed: bool = False):
+            with selection_lock:
+                used_endpoints.discard(ep)
+                if mark_failed:
+                    failed_endpoints.add(ep)
+                    # Evict from local routing table if known
+                    for c in self.dht.routing_table.all_contacts():
+                        if c.endpoint == ep:
+                            self.dht.routing_table.remove_contact(c.node_id)
+
+        def _upload_chunk_worker(desc: dict) -> dict:
+            chunk_id = desc["chunk_id"]
+            idx = desc["chunk_index"]
+            chunk_type = desc["chunk_type"]
+            data = desc["data"]
+            checksum = desc["checksum_sha256"]
+            size_bytes = desc["size_bytes"]
+
+            attempted_for_this_chunk: Set[str] = set()
+
+            while True:
+                endpoint = _get_next_endpoint(attempted_for_this_chunk)
+                if not endpoint:
+                    with selection_lock:
+                        attempted_count = len(attempted_for_this_chunk | failed_endpoints)
+                    raise RuntimeError(
+                        f"Failed storing chunk {chunk_id} (index {idx}): exhausted all available "
+                        f"passive nodes ({attempted_count} attempted, total candidates: {len(candidate_endpoints)})"
+                    )
+
+                attempted_for_this_chunk.add(endpoint)
+                stub = self._get_storage_stub(endpoint)
+                req = storage_pb2.StoreChunkRequest(
+                    chunk_id=chunk_id,
+                    chunk_index=idx,
+                    data=data,
+                    checksum_sha256=checksum,
+                )
+                try:
+                    resp = stub.StoreChunk(req, timeout=10.0)
+                    if resp.success:
+                        logger.info(
+                            f"Stored chunk {chunk_id} on {endpoint}"
+                            + (
+                                f" (after failover, tried {len(attempted_for_this_chunk)} nodes)"
+                                if len(attempted_for_this_chunk) > 1
+                                else ""
+                            )
+                        )
+                        return {
+                            "chunk_id": chunk_id,
+                            "chunk_index": idx,
+                            "chunk_type": chunk_type,
+                            "checksum_sha256": checksum,
+                            "size_bytes": size_bytes,
+                            "endpoint": endpoint,
+                        }
+                    else:
+                        logger.warning(
+                            f"StoreChunk returned success=False for {chunk_id} on {endpoint}, falling back..."
+                        )
+                        _release_endpoint(endpoint, mark_failed=True)
+                except Exception as e:
+                    logger.warning(
+                        f"Failed uploading chunk {chunk_id} to {endpoint}: {e}. Falling back to standby node..."
+                    )
+                    _release_endpoint(endpoint, mark_failed=True)
 
         uploaded_manifest_chunks = []
-        with ThreadPoolExecutor(max_workers=total_chunks) as executor:
+        with ThreadPoolExecutor(max_workers=min(total_chunks, 32)) as executor:
             future_to_chunk = {
-                executor.submit(_upload_chunk, desc): desc for desc in chunk_descriptors
+                executor.submit(_upload_chunk_worker, desc): desc for desc in chunk_descriptors
             }
+            errors = []
             for fut in as_completed(future_to_chunk):
-                success, desc = fut.result()
-                if not success:
-                    raise RuntimeError(f"Failed storing chunk {desc['chunk_id']} on {desc['endpoint']}")
-                # Strip binary data from manifest record
-                manifest_record = {k: v for k, v in desc.items() if k != "data"}
-                uploaded_manifest_chunks.append(manifest_record)
+                try:
+                    record = fut.result()
+                    uploaded_manifest_chunks.append(record)
+                except Exception as exc:
+                    errors.append(exc)
+
+        if errors:
+            raise RuntimeError(f"Failed to store checkpoint [{chk_id}]: {errors[0]}") from errors[0]
 
         uploaded_manifest_chunks.sort(key=lambda c: c["chunk_index"])
 
