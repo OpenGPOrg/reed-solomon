@@ -1,7 +1,7 @@
-"""End-to-end integration test for Reed-Solomon P2P gRPC Storage & DHT."""
+"""End-to-end integration test for decoupled Reed-Solomon P2P Storage & DHT."""
 
-import sys
 import shutil
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -9,8 +9,8 @@ from pathlib import Path
 # Add src to sys.path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from rs_p2p.network.peer_node import PassivePeerServer
 from rs_p2p.network.client import ActiveNodeClient
+from rs_p2p.network.peer_node import PassivePeerServer
 
 
 def run_integration_test():
@@ -19,17 +19,21 @@ def run_integration_test():
     print("=" * 70)
 
     temp_dir = Path(tempfile.mkdtemp(prefix="rs_p2p_test_"))
+    peers = []
+    client = None
+    restorer = None
     try:
         k = 4
         m = 2
         total_nodes = k + m
         base_port = 9100
-        peers = []
-
         seed_endpoint = f"127.0.0.1:{base_port}"
 
         # 1. Start 6 Passive Volunteer Peer Servers
-        print(f"\n[1/5] Launching {total_nodes} Passive Peer Servers on ports {base_port}..{base_port + total_nodes - 1}...")
+        print(
+            f"\n[1/5] Launching {total_nodes} Passive Peer Servers on ports "
+            f"{base_port}..{base_port + total_nodes - 1}..."
+        )
         for i in range(total_nodes):
             port = base_port + i
             node_id = f"volunteer_node_{i}"
@@ -40,40 +44,23 @@ def run_integration_test():
                 port=port,
                 storage_dir=peer_dir,
             )
-            # Node 0 is seed; others bootstrap against seed
             seeds = [seed_endpoint] if i > 0 else []
             peer.start(seed_endpoints=seeds)
             peers.append(peer)
 
-        time.sleep(1.0)
+        time.sleep(0.5)
         print("  ✓ All passive peers online and DHT bootstrapped.")
 
-        # 2. Connect Active Node Client
-        print("\n[2/5] Initializing Active Node Client...")
+        # 2. Connect Active Node Client (Client Mode)
+        print("\n[2/5] Initializing Active Node Client (Kademlia Client Mode)...")
         client = ActiveNodeClient(
             seed_endpoints=[seed_endpoint],
             client_node_id="active_compute_A2",
-            local_port=9200,
         )
-        print("  ✓ Active Node Client connected to DHT overlay.")
+        print("  ✓ Active Node Client connected to passive DHT overlay.")
 
-        # Test NS1: Layer placement
-        print("\n[3/5] Testing NS1 (Compute Network Layer Placement)...")
-        placement_ok = client.register_layer_placement(
-            stage_id="stage_2",
-            endpoint="10.0.0.2:50051",
-            extra={"layers": "L6-L9", "gpu": "RTX-4090"},
-        )
-        assert placement_ok, "Failed to register layer placement"
-        retrieved_placement = client.get_layer_placement("stage_2")
-        assert retrieved_placement is not None, "Failed to get layer placement"
-        assert retrieved_placement["stage_id"] == "stage_2"
-        assert retrieved_placement["endpoint"] == "10.0.0.2:50051"
-        assert retrieved_placement["extra"]["layers"] == "L6-L9"
-        print(f"  ✓ NS1 Layer Placement Verified: {retrieved_placement}")
-
-        # 3. Store Checkpoint Activation (NS2 & Passive Sharding)
-        print("\n[4/5] Storing Checkpoint Activation from A2 into Passive Network...")
+        # 3. Offload Checkpoint Activation to a Random Passive Relay
+        print("\n[3/5] Offloading Checkpoint Activation to Passive Storage Layer...")
         activation_data = b"ACTV_TENSOR_WEIGHTS_DATA_BLOCK_" * 128
         tensor_meta = {
             "source_node": "A2",
@@ -90,23 +77,49 @@ def run_integration_test():
             m=m,
             serializer_name="tensor",
             metadata=tensor_meta,
-            prefer_passive_nodes=[f"127.0.0.1:{base_port + i}" for i in range(total_nodes)],
         )
 
-        print(f"  ✓ Checkpoint stored! Total chunks: {len(manifest['chunks'])}")
-        for chk in manifest["chunks"]:
-            print(f"    - Chunk #{chk['chunk_index']} ({chk['chunk_type']}) -> Stored on {chk['endpoint']}")
+        endpoints_used = {chk["endpoint"] for chk in manifest["chunks"]}
+        assert len(manifest["chunks"]) == total_nodes
+        assert len(endpoints_used) == total_nodes, (
+            f"Expected {total_nodes} distinct endpoints, got {endpoints_used}"
+        )
+        assert manifest["chunks"][0]["endpoint"] == manifest["coordinator_endpoint"], (
+            "Expected coordinator passive node to store chunk #0 locally"
+        )
+        for p in peers:
+            for c in p.dht.routing_table.all_contacts():
+                assert c.role == "passive" and c.port > 0, (
+                    f"Routing table polluted with non-server contact: {c}"
+                )
 
-        # 4. Simulate Failure: Shut down m=2 volunteer peers!
-        print(f"\n[5/5] Simulating Node Failures: Stopping m={m} passive peers (nodes 0 and 1)...")
+        print(
+            f"  ✓ Checkpoint offloaded via relay {manifest['coordinator_endpoint']}; "
+            f"dispersed across {len(endpoints_used)} distinct peers:"
+        )
+        for chk in manifest["chunks"]:
+            print(
+                f"    - Chunk #{chk['chunk_index']} ({chk['chunk_type']}) -> {chk['endpoint']}"
+            )
+
+        # 4. Simulate Failure: Stop m=2 passive peers INCLUDING original seed!
+        print(
+            f"\n[4/5] Simulating Node Failures: Stopping m={m} peers (including seed node 0 and node 1)..."
+        )
         peers[0].stop()
         peers[1].stop()
-        time.sleep(0.5)
-        print("  ✓ Nodes 0 and 1 killed.")
+        time.sleep(0.3)
+        print("  ✓ Seed node 0 and node 1 killed.")
 
-        # 5. Restore Checkpoint Activation from surviving nodes
-        print("\nRestoring activation into Node B3 from surviving peers...")
-        restored_payload, restored_meta = client.receive_backup(
+        # 5. Restore from a fresh ActiveNodeClient bootstrapped ONLY to a surviving peer
+        print(
+            "\n[5/5] Restoring directly into fresh ActiveNodeClient B3 from surviving peers..."
+        )
+        restorer = ActiveNodeClient(
+            seed_endpoints=[f"127.0.0.1:{base_port + 2}"],
+            client_node_id="active_compute_B3",
+        )
+        restored_payload, restored_meta = restorer.receive_backup(
             checkpoint_id="chk_stage2_act",
             serializer_name="tensor",
         )
@@ -122,8 +135,10 @@ def run_integration_test():
         print("=" * 70)
 
     finally:
-        # Cleanup
-        client.close()
+        if client is not None:
+            client.close()
+        if restorer is not None:
+            restorer.close()
         for p in peers:
             try:
                 p.stop()
