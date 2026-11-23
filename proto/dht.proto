@@ -13,7 +13,7 @@ message NodeContact {
   string node_id = 1;     // Hex encoded 160-bit node ID or identifier
   string host = 2;
   int32 port = 3;         // gRPC port
-  string role = 4;         // "passive" (storage) or "active" (compute)
+  string role = 4;        // "passive" (DHT server) or "active" (client-only)
 }
 
 message PingRequest {
@@ -36,7 +36,7 @@ message FindNodeResponse {
 
 message FindValueRequest {
   NodeContact sender = 1;
-  string namespace = 2;    // e.g. "NS1" (liveness/placement) or "NS2" (chunks/context)
+  string namespace = 2;    // e.g. "storage_index"
   string key = 3;
 }
 
