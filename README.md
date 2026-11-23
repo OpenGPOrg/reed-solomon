@@ -69,23 +69,21 @@ reed-solomon/
 │   └── dht.proto                   # gRPC Kademlia DHT Service
 │
 ├── src/
-│   ├── rs_p2p/                     # Decentralized P2P & gRPC Engine
-│   │   ├── config.py               # Cluster defaults (k=4, m=2, ports, namespaces)
-│   │   ├── core/
-│   │   │   ├── codec.py            # zfec Reed-Solomon wrapper
-│   │   │   └── serializer.py       # Configurable Activation Serializer format
-│   │   ├── storage/
-│   │   │   └── disk.py             # Volunteer node disk chunk storage
-│   │   ├── dht/
-│   │   │   ├── node.py             # XOR distance, Contacts, K-Buckets, RoutingTable
-│   │   │   └── kademlia.py         # KademliaNode: iterative lookup, NS1 & NS2 store
-│   │   ├── proto/                  # Compiled gRPC Python stubs (storage_pb2, dht_pb2)
-│   │   └── network/
-│   │       ├── services.py         # gRPC Servicers (StorageServicer, DHTServicer)
-│   │       ├── peer_node.py        # Passive Volunteer Peer Server daemon
-│   │       └── client.py           # ActiveNodeClient SDK (send_checkpoint, receive_backup)
-│   │
-│   └── rs_raid/                    # Local folder-based disk array simulation
+│   └── rs_p2p/                     # Decentralized P2P & gRPC Engine
+│       ├── config.py               # Cluster defaults (k=4, m=2, ports, namespaces)
+│       ├── core/
+│       │   ├── codec.py            # zfec Reed-Solomon wrapper
+│       │   └── serializer.py       # Configurable Activation Serializer format
+│       ├── storage/
+│       │   └── disk.py             # Volunteer node disk chunk storage
+│       ├── dht/
+│       │   ├── node.py             # XOR distance, Contacts, K-Buckets, RoutingTable
+│       │   └── kademlia.py         # KademliaNode: iterative lookup, NS1 & NS2 store
+│       ├── proto/                  # Compiled gRPC Python stubs (storage_pb2, dht_pb2)
+│       └── network/
+│           ├── services.py         # gRPC Servicers (StorageServicer, DHTServicer)
+│           ├── peer_node.py        # Passive Volunteer Peer Server daemon
+│           └── client.py           # ActiveNodeClient SDK (send_checkpoint, receive_backup)
 │
 ├── tests/
 │   ├── test_codec_and_serializer.py# Unit tests for RS and serializers
@@ -99,18 +97,11 @@ reed-solomon/
 
 ## 🚀 Quick Start
 
-### 1. Run Automated P2P gRPC + DHT Demo
+### Run Automated P2P gRPC + DHT Demo
 Spins up 6 passive peer servers on local ports, bootstraps DHT, stores an activation checkpoint, **intentionally kills $m=2$ volunteer peers**, and recovers the activation **100% bit-for-bit** directly from surviving peers:
 
 ```bash
 uv run python main.py p2p-demo
-```
-
-### 2. Run Local RAID Array Simulation
-Tests folder-based Reed-Solomon RAID array encoding, drive failure, and auto-healing:
-
-```bash
-uv run python main.py demo
 ```
 
 ---

@@ -22,7 +22,3 @@ DEFAULT_PEER_PORT = 7001
 # Paths
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 VOLUNTEER_STORAGE_DIR = BASE_DIR / "volunteer_storage"
-RESTORED_DIR = BASE_DIR / "output" / "restored"
-
-VOLUNTEER_STORAGE_DIR.mkdir(parents=True, exist_ok=True)
-RESTORED_DIR.mkdir(parents=True, exist_ok=True)
